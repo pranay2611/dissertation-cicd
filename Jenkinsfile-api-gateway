@@ -1,0 +1,118 @@
+pipeline {
+    agent any
+    
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        ECR_REPOSITORY = 'api-gateway'
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        CLUSTER_NAME = 'dissertation-cluster'
+        SERVICE_NAME = 'api-gateway-service'
+        TASK_DEFINITION = 'api-gateway'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                sh 'mvn clean package -DskipTests -Pprod'
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    docker.build("${ECR_REPOSITORY}:${BUILD_NUMBER}")
+                    docker.build("${ECR_REPOSITORY}:latest")
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            steps {
+                script {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        docker tag ${ECR_REPOSITORY}:${BUILD_NUMBER} ${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}
+                        docker tag ${ECR_REPOSITORY}:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${BUILD_NUMBER}
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Update ECS Service') {
+            steps {
+                script {
+                    sh """
+                        aws ecs update-service \
+                          --cluster ${CLUSTER_NAME} \
+                          --service ${SERVICE_NAME} \
+                          --force-new-deployment \
+                          --region ${AWS_REGION}
+                    """
+                }
+            }
+        }
+        
+        stage('Wait for Deployment') {
+            steps {
+                script {
+                    sh """
+                        aws ecs wait services-stable \
+                          --cluster ${CLUSTER_NAME} \
+                          --services ${SERVICE_NAME} \
+                          --region ${AWS_REGION}
+                    """
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                script {
+                    sh """
+                        sleep 30
+                        curl -f http://<alb-dns-name>/health || exit 1
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo 'API Gateway deployment succeeded!'
+        }
+        failure {
+            echo 'API Gateway deployment failed!'
+            emailext (
+                subject: "Pipeline Failed: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: "Check console output at ${env.BUILD_URL}",
+                to: "devops@example.com"
+            )
+        }
+    }
+}
+

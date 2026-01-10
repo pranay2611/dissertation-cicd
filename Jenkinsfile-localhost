@@ -1,0 +1,674 @@
+pipeline {
+    agent any
+    
+    environment {
+        PATH = "/opt/homebrew/bin:${env.PATH}"
+        DOCKER_HOST = "unix:///var/run/docker.sock"
+        COMPOSE_PROJECT_NAME = 'dissertation'
+        DOCKER_COMPOSE_FILE = 'docker-compose.yml'
+        MAVEN_IMAGE = 'maven:3.9-eclipse-temurin-17'
+        // Default will be set by detection stage, fallback to docker compose (v2)
+        DOCKER_COMPOSE_CMD = 'docker compose'
+    }
+    
+    stages {
+        stage('Checkout All Repositories') {
+            parallel {
+                stage('Checkout CI/CD Repo') {
+                    steps {
+                        checkout scm
+                    }
+                }
+                stage('Checkout API Gateway') {
+                    steps {
+                        dir('api-gateway') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/dissertation-api-gateway.git'
+                        }
+                    }
+                }
+                stage('Checkout User Service') {
+                    steps {
+                        dir('userservice') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/user-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Order Service') {
+                    steps {
+                        dir('orderservice') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/order-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Payment Service') {
+                    steps {
+                        dir('paymentservice') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/payment-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Notification Service') {
+                    steps {
+                        dir('notificationservice') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/notification-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Integration Tests') {
+                    steps {
+                        dir('integration-test') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/dissertation-integration-test.git'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Setup Docker Compose') {
+            steps {
+                script {
+                    // Verify docker-compose.yml exists (it should be at root from CI/CD repo checkout)
+                    sh '''
+                        echo "=== Verifying workspace structure ==="
+                        pwd
+                        echo ""
+                        echo "=== Checking for docker-compose.yml ==="
+                        if [ -f "docker-compose.yml" ]; then
+                            echo "✓ docker-compose.yml found in workspace root"
+                            ls -lh docker-compose.yml
+                        elif [ -f "jenkins/docker-compose.yml" ]; then
+                            echo "✓ docker-compose.yml found in jenkins directory, copying to root"
+                            cp jenkins/docker-compose.yml docker-compose.yml
+                        else
+                            echo "✗ docker-compose.yml not found"
+                            echo "Available files:"
+                            ls -la | head -20
+                        fi
+                    '''
+                    
+                    // Verify file exists and is accessible
+                    if (fileExists('docker-compose.yml')) {
+                        echo '✓ docker-compose.yml is available in workspace root'
+                    } else if (fileExists('jenkins/docker-compose.yml')) {
+                        sh 'cp jenkins/docker-compose.yml docker-compose.yml'
+                        echo '✓ Copied docker-compose.yml from jenkins directory to workspace root'
+                    } else {
+                        error("""
+                            docker-compose.yml not found!
+                            
+                            Expected locations:
+                            - docker-compose.yml (workspace root)
+                            - jenkins/docker-compose.yml
+                            
+                            Please ensure docker-compose.yml is committed to the dissertation-cicd repository.
+                            Current workspace contents:
+                        """)
+                        sh 'ls -la'
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Docker Connection') {
+            steps {
+                sh '''
+                    echo "=== Docker Environment ==="
+                    echo "PATH: $PATH"
+                    echo "DOCKER_HOST: $DOCKER_HOST"
+                    
+                    echo "=== Docker Socket ==="
+                    ls -la /var/run/docker.sock || echo "Socket not found at /var/run/docker.sock"
+                    
+                    echo "=== Docker Version ==="
+                    docker --version
+                    
+                    echo "=== Docker Info ==="
+                    docker info || echo "Cannot connect to daemon"
+                    
+                    echo "=== Test Docker Run ==="
+                    docker ps
+                '''
+            }
+        }
+        
+        stage('Detect Docker Compose Command') {
+            steps {
+                script {
+                    // Try docker compose (v2) first, fall back to docker-compose (v1)
+                    try {
+                        sh 'docker compose version > /dev/null 2>&1'
+                        env.DOCKER_COMPOSE_CMD = 'docker compose'
+                        echo "Using Docker Compose v2: docker compose"
+                    } catch (Exception e) {
+                        try {
+                            sh 'docker-compose --version > /dev/null 2>&1'
+                            env.DOCKER_COMPOSE_CMD = 'docker-compose'
+                            echo "Using Docker Compose v1: docker-compose"
+                        } catch (Exception e2) {
+                            error("Neither 'docker compose' nor 'docker-compose' is available. Please install Docker Compose.")
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build All Services') {
+            parallel {
+                stage('Build API Gateway') {
+                    steps {
+                        script {
+                            dir('api-gateway') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                sh """
+                                    mkdir -p "${m2Cache}" || true
+                                    docker run --rm -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean package -DskipTests
+                                """
+                            }
+                        }
+                    }
+                }
+                stage('Build User Service') {
+                    steps {
+                        script {
+                            dir('userservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                sh """
+                                    mkdir -p "${m2Cache}" || true
+                                    docker run --rm -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean package -DskipTests
+                                """
+                            }
+                        }
+                    }
+                }
+                stage('Build Order Service') {
+                    steps {
+                        script {
+                            dir('orderservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                sh """
+                                    mkdir -p "${m2Cache}" || true
+                                    docker run --rm -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean package -DskipTests
+                                """
+                            }
+                        }
+                    }
+                }
+                stage('Build Payment Service') {
+                    steps {
+                        script {
+                            dir('paymentservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                sh """
+                                    mkdir -p "${m2Cache}" || true
+                                    docker run --rm -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean package -DskipTests
+                                """
+                            }
+                        }
+                    }
+                }
+                stage('Build Notification Service') {
+                    steps {
+                        script {
+                            dir('notificationservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                sh """
+                                    mkdir -p "${m2Cache}" || true
+                                    docker run --rm -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean package -DskipTests
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true, allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Stop Existing Containers') {
+            steps {
+                script {
+                    sh """
+                        echo "Stopping any existing containers..."
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} down -v || true
+                        # Wait a moment for cleanup
+                        sleep 5
+                    """
+                }
+            }
+        }
+        
+        stage('Start Infrastructure Services for Tests') {
+            steps {
+                script {
+                    sh """
+                        echo "Starting infrastructure services (databases, redis, kafka) for tests..."
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d redis zookeeper kafka user-db order-db payment-db notification-db
+                        echo "Waiting for infrastructure services to be healthy..."
+                        sleep 30
+                        
+                        echo "Verifying database connectivity..."
+                        # Wait for databases to be ready
+                        max_attempts=10
+                        attempt=0
+                        while [ \$attempt -lt \$max_attempts ]; do
+                            attempt=\$((attempt + 1))
+                            echo "Checking database readiness (attempt \$attempt/\$max_attempts)..."
+                            
+                            # Check each database
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5436 -U postgres > /dev/null 2>&1 && echo "✓ user-db ready" || echo "✗ user-db not ready"
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5433 -U postgres > /dev/null 2>&1 && echo "✓ order-db ready" || echo "✗ order-db not ready"
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5434 -U postgres > /dev/null 2>&1 && echo "✓ payment-db ready" || echo "✗ payment-db not ready"
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5435 -U postgres > /dev/null 2>&1 && echo "✓ notification-db ready" || echo "✗ notification-db not ready"
+                            
+                            # Check if all databases are ready
+                            if docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5436 -U postgres > /dev/null 2>&1 && \
+                               docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5433 -U postgres > /dev/null 2>&1 && \
+                               docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5434 -U postgres > /dev/null 2>&1 && \
+                               docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5435 -U postgres > /dev/null 2>&1; then
+                                echo "All databases are ready!"
+                                break
+                            fi
+                            
+                            if [ \$attempt -lt \$max_attempts ]; then
+                                echo "Waiting 5 seconds before next attempt..."
+                                sleep 5
+                            fi
+                        done
+                    """
+                }
+            }
+        }
+        
+        stage('Run Unit Tests') {
+            parallel {
+                stage('Test API Gateway') {
+                    steps {
+                        script {
+                            dir('api-gateway') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                sh """
+                                    docker run --rm -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn test
+                                """
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'api-gateway/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test User Service') {
+                    steps {
+                        script {
+                            dir('userservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                // Tests require databases - configure with correct port and use host.docker.internal for macOS
+                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                    sh """
+                                        docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
+                                        -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5436/userdb \
+                                        -e SPRING_DATASOURCE_USERNAME=postgres \
+                                        -e SPRING_DATASOURCE_PASSWORD=postgres \
+                                        ${MAVEN_IMAGE} mvn test
+                                    """
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'userservice/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test Order Service') {
+                    steps {
+                        script {
+                            dir('orderservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                // Tests require databases - configure with correct port
+                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                    sh """
+                                        docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
+                                        -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5433/orderdb \
+                                        -e SPRING_DATASOURCE_USERNAME=postgres \
+                                        -e SPRING_DATASOURCE_PASSWORD=postgres \
+                                        ${MAVEN_IMAGE} mvn test
+                                    """
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'orderservice/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test Payment Service') {
+                    steps {
+                        script {
+                            dir('paymentservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                // Tests require databases - configure with correct port
+                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                    sh """
+                                        docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
+                                        -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5434/paymentdb \
+                                        -e SPRING_DATASOURCE_USERNAME=postgres \
+                                        -e SPRING_DATASOURCE_PASSWORD=postgres \
+                                        ${MAVEN_IMAGE} mvn test
+                                    """
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'paymentservice/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test Notification Service') {
+                    steps {
+                        script {
+                            dir('notificationservice') {
+                                def workspace = pwd()
+                                def m2Cache = "${env.HOME}/.m2"
+                                // Tests require databases - configure with correct port
+                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                    sh """
+                                        docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
+                                        -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5435/notificationdb \
+                                        -e SPRING_DATASOURCE_USERNAME=postgres \
+                                        -e SPRING_DATASOURCE_PASSWORD=postgres \
+                                        ${MAVEN_IMAGE} mvn test
+                                    """
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'notificationservice/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Images') {
+            steps {
+                script {
+                    sh """
+                        echo "Building Docker images for all services..."
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} build --no-cache
+                    """
+                }
+            }
+        }
+        
+        stage('Start Infrastructure Services') {
+            steps {
+                script {
+                    sh """
+                        echo "Ensuring infrastructure services are running..."
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d redis zookeeper kafka user-db order-db payment-db notification-db
+                        echo "Waiting for infrastructure services to be healthy..."
+                        sleep 10
+                    """
+                }
+            }
+        }
+        
+        stage('Start Microservices') {
+            steps {
+                script {
+                    sh """
+                        echo "Starting all microservices..."
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d
+                        echo "Waiting for services to start..."
+                        sleep 60
+                    """
+                }
+            }
+        }
+        
+        stage('Wait for Services to be Healthy') {
+            steps {
+                script {
+                    sh """
+                        echo "Checking service health endpoints..."
+                        max_attempts=30
+                        attempt=0
+                        
+                        check_health() {
+                            local url=\$1
+                            local service=\$2
+                            local status_code=\$(curl -s -o /dev/null -w "%{http_code}" \${url} || echo "000")
+                            if [ "\${status_code}" = "200" ] || [ "\${status_code}" = "404" ]; then
+                                echo "✓ \${service} is responding (status: \${status_code})"
+                                return 0
+                            else
+                                echo "✗ \${service} not ready yet (status: \${status_code})"
+                                return 1
+                            fi
+                        }
+                        
+                        while [ \${attempt} -lt \${max_attempts} ]; do
+                            attempt=\$((attempt + 1))
+                            echo "Health check attempt \${attempt}/\${max_attempts}"
+                            
+                            all_healthy=true
+                            
+                            check_health "http://localhost:8081/api/auth/health" "User Service" || all_healthy=false
+                            check_health "http://localhost:8083/api/payments/health" "Payment Service" || all_healthy=false
+                            check_health "http://localhost:8084/api/notifications/health" "Notification Service" || all_healthy=false
+                            check_health "http://localhost:8082/api/orders/health" "Order Service" || all_healthy=false
+                            check_health "http://localhost:8080/actuator/health" "API Gateway" || all_healthy=false
+                            
+                            if [ "\${all_healthy}" = "true" ]; then
+                                echo "All services are healthy!"
+                                break
+                            fi
+                            
+                            if [ \${attempt} -lt \${max_attempts} ]; then
+                                echo "Waiting 10 seconds before next attempt..."
+                                sleep 10
+                            fi
+                        done
+                        
+                        if [ "\${all_healthy}" != "true" ]; then
+                            echo "ERROR: Not all services are healthy after \${max_attempts} attempts"
+                            ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} ps
+                            ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} logs --tail=50
+                            exit 1
+                        fi
+                    """
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                script {
+                    sh '''
+                        echo "Performing final health checks..."
+                        
+                        services=(
+                            "http://localhost:8080/actuator/health:API Gateway"
+                            "http://localhost:8081/api/auth/health:User Service"
+                            "http://localhost:8082/api/orders/health:Order Service"
+                            "http://localhost:8083/api/payments/health:Payment Service"
+                            "http://localhost:8084/api/notifications/health:Notification Service"
+                        )
+                        
+                        failed=false
+                        for service_info in "${services[@]}"; do
+                            url=$(echo $service_info | cut -d: -f1-3)
+                            name=$(echo $service_info | cut -d: -f4)
+                            echo "Checking ${name} at ${url}..."
+                            
+                            response=$(curl -s -w "\\n%{http_code}" ${url} || echo -e "\\n000")
+                            http_code=$(echo "$response" | tail -n1)
+                            body=$(echo "$response" | sed '$d')
+                            
+                            if [ "$http_code" = "200" ]; then
+                                echo "✓ ${name} is healthy (HTTP ${http_code})"
+                                echo "Response: ${body}"
+                            else
+                                echo "✗ ${name} health check failed (HTTP ${http_code})"
+                                echo "Response: ${body}"
+                                failed=true
+                            fi
+                        done
+                        
+                        if [ "$failed" = "true" ]; then
+                            echo "Some services failed health checks"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Run Integration Tests') {
+            steps {
+                script {
+                    if (fileExists('integration-test')) {
+                        dir('integration-test') {
+                            def workspace = pwd()
+                            def m2Cache = "${env.HOME}/.m2"
+                            echo "Running TestNG integration tests from ${workspace}..."
+                            echo "Integration tests will access services at http://localhost:8080"
+                            echo "Using TestNG suite: src/test/resources/testng.xml"
+                            sh """
+                                docker run --rm --network host -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean test -DsuiteXmlFile=src/test/resources/testng.xml
+                            """
+                        }
+                    } else {
+                        error('Integration test directory not found! Expected: integration-test')
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        if (fileExists('integration-test/target/surefire-reports')) {
+                            junit 'integration-test/target/surefire-reports/*.xml'
+                        } else {
+                            echo 'No surefire reports found to publish'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Display Service Status') {
+            steps {
+                script {
+                    sh """
+                        echo "=== Docker Compose Service Status ==="
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} ps
+                        
+                        echo ""
+                        echo "=== Service Endpoints ==="
+                        echo "API Gateway: http://localhost:8080/actuator/health"
+                        echo "User Service: http://localhost:8081/api/auth/health"
+                        echo "Order Service: http://localhost:8082/api/orders/health"
+                        echo "Payment Service: http://localhost:8083/api/payments/health"
+                        echo "Notification Service: http://localhost:8084/api/notifications/health"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                // Detect Docker Compose command if not already set (fallback for post block)
+                def composeCmd
+                try {
+                    composeCmd = env.DOCKER_COMPOSE_CMD
+                } catch (Exception e) {
+                    composeCmd = null
+                }
+                if (!composeCmd || (composeCmd instanceof String && composeCmd.trim().isEmpty())) {
+                    def status = sh(script: 'docker compose version > /dev/null 2>&1', returnStatus: true)
+                    if (status == 0) {
+                        composeCmd = 'docker compose'
+                    } else {
+                        status = sh(script: 'docker-compose --version > /dev/null 2>&1', returnStatus: true)
+                        composeCmd = (status == 0) ? 'docker-compose' : 'docker compose'
+                    }
+                }
+                
+                // Optionally keep containers running for manual testing
+                // Uncomment the following line if you want to stop containers after pipeline
+                // sh "${composeCmd} -f ${DOCKER_COMPOSE_FILE} down"
+                
+                // Archive logs for debugging
+                sh """
+                    ${composeCmd} -f ${DOCKER_COMPOSE_FILE} logs > docker-compose-logs.txt 2>&1 || true
+                """
+                archiveArtifacts artifacts: 'docker-compose-logs.txt', allowEmptyArchive: true
+            }
+        }
+        success {
+            echo 'Pipeline succeeded! All services are running on localhost.'
+            echo 'Services are available at:'
+            echo '  - API Gateway: http://localhost:8080'
+            echo '  - User Service: http://localhost:8081'
+            echo '  - Order Service: http://localhost:8082'
+            echo '  - Payment Service: http://localhost:8083'
+            echo '  - Notification Service: http://localhost:8084'
+        }
+        failure {
+            echo 'Pipeline failed! Check logs for details.'
+            script {
+                // Detect Docker Compose command if not already set (fallback for post block)
+                def composeCmd
+                try {
+                    composeCmd = env.DOCKER_COMPOSE_CMD
+                } catch (Exception e) {
+                    composeCmd = null
+                }
+                if (!composeCmd || (composeCmd instanceof String && composeCmd.trim().isEmpty())) {
+                    def status = sh(script: 'docker compose version > /dev/null 2>&1', returnStatus: true)
+                    if (status == 0) {
+                        composeCmd = 'docker compose'
+                    } else {
+                        status = sh(script: 'docker-compose --version > /dev/null 2>&1', returnStatus: true)
+                        composeCmd = (status == 0) ? 'docker-compose' : 'docker compose'
+                    }
+                }
+                
+                sh """
+                    echo "=== Container Logs ==="
+                    ${composeCmd} -f ${DOCKER_COMPOSE_FILE} logs --tail=100 2>&1 || echo "Could not retrieve logs"
+                    
+                    echo "=== Container Status ==="
+                    ${composeCmd} -f ${DOCKER_COMPOSE_FILE} ps -a 2>&1 || echo "Could not retrieve container status"
+                """
+            }
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}
+

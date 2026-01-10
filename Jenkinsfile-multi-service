@@ -1,0 +1,210 @@
+pipeline {
+    agent any
+    
+    environment {
+        AWS_REGION = 'us-east-1'
+        CLUSTER_NAME = 'dissertation-cluster'
+    }
+    
+    stages {
+        stage('Checkout All Repositories') {
+            parallel {
+                stage('Checkout API Gateway') {
+                    steps {
+                        dir('api-gateway') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/dissertation-api-gateway.git'
+                        }
+                    }
+                }
+                stage('Checkout User Service') {
+                    steps {
+                        dir('user-service') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/user-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Order Service') {
+                    steps {
+                        dir('order-service') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/order-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Payment Service') {
+                    steps {
+                        dir('payment-service') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/payment-service.git'
+                        }
+                    }
+                }
+                stage('Checkout Notification Service') {
+                    steps {
+                        dir('notification-service') {
+                            git branch: 'main', url: 'https://github.com/pranay2611/notification-service.git'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build All Services') {
+            parallel {
+                stage('Build API Gateway') {
+                    steps {
+                        dir('api-gateway') {
+                            sh 'mvn clean package -DskipTests -Pprod'
+                        }
+                    }
+                }
+                stage('Build User Service') {
+                    steps {
+                        dir('user-service') {
+                            sh 'mvn clean package -DskipTests -Pprod'
+                        }
+                    }
+                }
+                stage('Build Order Service') {
+                    steps {
+                        dir('order-service') {
+                            sh 'mvn clean package -DskipTests -Pprod'
+                        }
+                    }
+                }
+                stage('Build Payment Service') {
+                    steps {
+                        dir('payment-service') {
+                            sh 'mvn clean package -DskipTests -Pprod'
+                        }
+                    }
+                }
+                stage('Build Notification Service') {
+                    steps {
+                        dir('notification-service') {
+                            sh 'mvn clean package -DskipTests -Pprod'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build and Push Docker Images') {
+            parallel {
+                stage('API Gateway Image') {
+                    steps {
+                        script {
+                            dir('api-gateway') {
+                                sh """
+                                    docker build -t api-gateway:${BUILD_NUMBER} .
+                                    docker tag api-gateway:${BUILD_NUMBER} <account-id>.dkr.ecr.${AWS_REGION}.amazonaws.com/api-gateway:${BUILD_NUMBER}
+                                    docker tag api-gateway:${BUILD_NUMBER} <account-id>.dkr.ecr.${AWS_REGION}.amazonaws.com/api-gateway:latest
+                                    aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin <account-id>.dkr.ecr.${AWS_REGION}.amazonaws.com
+                                    docker push <account-id>.dkr.ecr.${AWS_REGION}.amazonaws.com/api-gateway:${BUILD_NUMBER}
+                                    docker push <account-id>.dkr.ecr.${AWS_REGION}.amazonaws.com/api-gateway:latest
+                                """
+                            }
+                        }
+                    }
+                }
+                // Repeat for other services
+            }
+        }
+        
+        stage('Deploy to ECS') {
+            parallel {
+                stage('Deploy API Gateway') {
+                    steps {
+                        sh """
+                            aws ecs update-service \
+                              --cluster ${CLUSTER_NAME} \
+                              --service api-gateway-service \
+                              --force-new-deployment \
+                              --region ${AWS_REGION}
+                        """
+                    }
+                }
+                stage('Deploy User Service') {
+                    steps {
+                        sh """
+                            aws ecs update-service \
+                              --cluster ${CLUSTER_NAME} \
+                              --service user-service \
+                              --force-new-deployment \
+                              --region ${AWS_REGION}
+                        """
+                    }
+                }
+                stage('Deploy Order Service') {
+                    steps {
+                        sh """
+                            aws ecs update-service \
+                              --cluster ${CLUSTER_NAME} \
+                              --service order-service \
+                              --force-new-deployment \
+                              --region ${AWS_REGION}
+                        """
+                    }
+                }
+                stage('Deploy Payment Service') {
+                    steps {
+                        sh """
+                            aws ecs update-service \
+                              --cluster ${CLUSTER_NAME} \
+                              --service payment-service \
+                              --force-new-deployment \
+                              --region ${AWS_REGION}
+                        """
+                    }
+                }
+                stage('Deploy Notification Service') {
+                    steps {
+                        sh """
+                            aws ecs update-service \
+                              --cluster ${CLUSTER_NAME} \
+                              --service notification-service \
+                              --force-new-deployment \
+                              --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Wait for Services to Stabilize') {
+            steps {
+                sh """
+                    aws ecs wait services-stable \
+                      --cluster ${CLUSTER_NAME} \
+                      --services api-gateway-service user-service order-service payment-service notification-service \
+                      --region ${AWS_REGION}
+                """
+            }
+        }
+        
+        stage('Run Integration Tests') {
+            steps {
+                dir('integrationtestautomation') {
+                    git branch: 'main', url: 'https://github.com/pranay2611/dissertation-integration-test.git'
+                    sh 'mvn clean test'
+                }
+            }
+            post {
+                always {
+                    junit 'integrationtestautomation/target/surefire-reports/*.xml'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo 'All services deployed successfully!'
+        }
+        failure {
+            echo 'Deployment failed!'
+        }
+    }
+}
+

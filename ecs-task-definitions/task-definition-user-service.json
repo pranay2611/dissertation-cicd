@@ -1,0 +1,64 @@
+{
+  "family": "user-service",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<account-id>:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "user-service",
+      "image": "<account-id>.dkr.ecr.us-east-1.amazonaws.com/user-service:latest",
+      "portMappings": [
+        {
+          "containerPort": 8081,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "SPRING_PROFILES_ACTIVE",
+          "value": "prod"
+        },
+        {
+          "name": "SPRING_DATASOURCE_URL",
+          "value": "jdbc:postgresql://<rds-endpoint>:5432/userdb"
+        },
+        {
+          "name": "SPRING_DATASOURCE_USERNAME",
+          "value": "postgres"
+        },
+        {
+          "name": "SPRING_DATASOURCE_PASSWORD",
+          "value": "<password-from-secrets-manager>"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "SPRING_DATASOURCE_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:<account-id>:secret:rds/db-password"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/user-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8081/api/auth/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ]
+}
+
