@@ -558,6 +558,10 @@ pipeline {
                             sh """
                                 docker run --rm --network host -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean test -DsuiteXmlFile=src/test/resources/testng.xml
                             """
+                            // Generate TestNG HTML reports
+                            sh """
+                                docker run --rm --network host -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn surefire-report:report-only || true
+                            """
                         }
                     } else {
                         error('Integration test directory not found! Expected: integration-test')
@@ -567,8 +571,47 @@ pipeline {
             post {
                 always {
                     script {
-                        if (fileExists('integration-test/target/surefire-reports')) {
-                            junit 'integration-test/target/surefire-reports/*.xml'
+                        def reportDir = 'integration-test/target'
+                        def surefireReports = "${reportDir}/surefire-reports"
+                        def surefireHtmlReport = "${reportDir}/site/surefire-report.html"
+                        def testOutputDir = "${reportDir}/test-output"
+                        
+                        // Publish JUnit XML reports (compatible with TestNG)
+                        if (fileExists(surefireReports)) {
+                            echo "Publishing JUnit XML reports from ${surefireReports}"
+                            junit "${surefireReports}/*.xml"
+                            
+                            // Archive surefire reports directory
+                            archiveArtifacts artifacts: "${surefireReports}/**/*", allowEmptyArchive: true
+                            
+                            // Publish Surefire HTML report if it exists
+                            if (fileExists(surefireHtmlReport)) {
+                                echo "Publishing Surefire HTML report from ${surefireHtmlReport}"
+                                publishHTML([
+                                    reportDir: "${reportDir}/site",
+                                    reportFiles: 'surefire-report.html',
+                                    reportName: 'TestNG Surefire Report',
+                                    keepAll: true,
+                                    allowMissing: true
+                                ])
+                            }
+                            
+                            // Check for TestNG test-output directory (if TestNG generates it)
+                            if (fileExists(testOutputDir)) {
+                                echo "Found TestNG test-output directory at ${testOutputDir}"
+                                archiveArtifacts artifacts: "${testOutputDir}/**/*", allowEmptyArchive: true
+                                
+                                // Try to publish TestNG HTML report if index.html exists
+                                if (fileExists("${testOutputDir}/index.html")) {
+                                    publishHTML([
+                                        reportDir: testOutputDir,
+                                        reportFiles: 'index.html',
+                                        reportName: 'TestNG HTML Report',
+                                        keepAll: true,
+                                        allowMissing: true
+                                    ])
+                                }
+                            }
                         } else {
                             echo 'No surefire reports found to publish'
                         }
