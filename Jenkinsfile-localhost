@@ -109,6 +109,65 @@ pipeline {
             }
         }
         
+        stage('Start Docker Desktop') {
+            steps {
+                script {
+                    sh '''
+                        echo "=== Checking Docker Desktop Status ==="
+                        
+                        # Check if Docker daemon is already running
+                        if docker info > /dev/null 2>&1; then
+                            echo "✓ Docker daemon is already running"
+                            docker info | head -5
+                            exit 0
+                        fi
+                        
+                        echo "Docker daemon is not running. Attempting to start Docker Desktop..."
+                        
+                        # Check if Docker Desktop application exists (macOS)
+                        if [ -d "/Applications/Docker.app" ]; then
+                            echo "Found Docker Desktop at /Applications/Docker.app"
+                            echo "Starting Docker Desktop..."
+                            
+                            # Start Docker Desktop
+                            open -a Docker || echo "Failed to start Docker Desktop with 'open -a Docker'"
+                            
+                            # Wait for Docker daemon to become available
+                            echo "Waiting for Docker daemon to start..."
+                            max_attempts=60
+                            attempt=0
+                            
+                            while [ $attempt -lt $max_attempts ]; do
+                                attempt=$((attempt + 1))
+                                
+                                if docker info > /dev/null 2>&1; then
+                                    echo "✓ Docker daemon is now running! (took ${attempt} seconds)"
+                                    docker info | head -5
+                                    break
+                                fi
+                                
+                                if [ $attempt -lt $max_attempts ]; then
+                                    echo "Waiting for Docker daemon... (attempt ${attempt}/${max_attempts})"
+                                    sleep 2
+                                fi
+                            done
+                            
+                            # Final check
+                            if ! docker info > /dev/null 2>&1; then
+                                echo "✗ ERROR: Docker daemon failed to start after ${max_attempts} attempts"
+                                echo "Please ensure Docker Desktop is installed and can be started manually"
+                                exit 1
+                            fi
+                        else
+                            echo "✗ ERROR: Docker Desktop not found at /Applications/Docker.app"
+                            echo "Please install Docker Desktop from https://www.docker.com/products/docker-desktop"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+        
         stage('Verify Docker Connection') {
             steps {
                 sh '''
@@ -123,7 +182,10 @@ pipeline {
                     docker --version
                     
                     echo "=== Docker Info ==="
-                    docker info || echo "Cannot connect to daemon"
+                    docker info || {
+                        echo "ERROR: Cannot connect to Docker daemon"
+                        exit 1
+                    }
                     
                     echo "=== Test Docker Run ==="
                     docker ps
