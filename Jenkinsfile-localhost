@@ -646,16 +646,14 @@ pipeline {
                             // Archive surefire reports directory
                             archiveArtifacts artifacts: "${surefireReports}/**/*", allowEmptyArchive: true
                             
-                            // Publish Surefire HTML report if it exists
+                            // Archive Surefire HTML report if it exists
+                            // Note: publishHTML requires HTML Publisher plugin to be installed
+                            // For now, we archive the reports instead
                             if (fileExists(surefireHtmlReport)) {
-                                echo "Publishing Surefire HTML report from ${surefireHtmlReport}"
-                                publishHTML([
-                                    reportDir: "${reportDir}/site",
-                                    reportFiles: 'surefire-report.html',
-                                    reportName: 'TestNG Surefire Report',
-                                    keepAll: true,
-                                    allowMissing: true
-                                ])
+                                echo "Surefire HTML report found at ${surefireHtmlReport}"
+                                echo "Note: HTML Publisher plugin not installed. Reports are archived as artifacts."
+                                // Archive the HTML report as an artifact
+                                archiveArtifacts artifacts: "${reportDir}/site/**/*.html", allowEmptyArchive: true
                             }
                             
                             // Check for TestNG test-output directory (if TestNG generates it)
@@ -663,15 +661,13 @@ pipeline {
                                 echo "Found TestNG test-output directory at ${testOutputDir}"
                                 archiveArtifacts artifacts: "${testOutputDir}/**/*", allowEmptyArchive: true
                                 
-                                // Try to publish TestNG HTML report if index.html exists
+                                // Archive TestNG HTML report if index.html exists
+                                // Note: publishHTML requires HTML Publisher plugin to be installed
+                                // For now, we archive the reports instead
                                 if (fileExists("${testOutputDir}/index.html")) {
-                                    publishHTML([
-                                        reportDir: testOutputDir,
-                                        reportFiles: 'index.html',
-                                        reportName: 'TestNG HTML Report',
-                                        keepAll: true,
-                                        allowMissing: true
-                                    ])
+                                    echo "TestNG HTML report found at ${testOutputDir}/index.html"
+                                    echo "Note: HTML Publisher plugin not installed. Reports are archived as artifacts."
+                                    // The test-output directory is already archived above, so no additional action needed
                                 }
                             }
                         } else {
