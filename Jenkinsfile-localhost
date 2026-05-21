@@ -761,15 +761,47 @@ pipeline {
                 sh """
                     echo "=== Container Logs ==="
                     ${composeCmd} -f ${DOCKER_COMPOSE_FILE} logs --tail=100 2>&1 || echo "Could not retrieve logs"
-                    
+
                     echo "=== Container Status ==="
                     ${composeCmd} -f ${DOCKER_COMPOSE_FILE} ps -a 2>&1 || echo "Could not retrieve container status"
+
+                    echo "\n=== Attempting to invoke self-healing service for failure analysis ==="
+
+                    # Locate a TestNG/Surefire XML report produced by integration tests
+                    REPORT_FILE=\$(ls -1 integration-test/target/surefire-reports/*.xml 2>/dev/null | head -n1 || true)
+
+                    if [ -n "\${REPORT_FILE}" ] && [ -f "\${REPORT_FILE}" ]; then
+                        echo "Found TestNG/Surefire report: \${REPORT_FILE}"
+                        echo "Posting report to self-healing service at http://localhost:8085/api/selfhealing/test-fixes"
+
+                        # POST the XML report and capture response (pretty-print raw JSON)
+                        curl -s -X POST \
+                            -H 'Content-Type: application/xml' \
+                            --data-binary @"\${REPORT_FILE}" \
+                            http://localhost:8085/api/selfhealing/test-fixes \
+                            -o healing_response.json -w "\nHTTP_STATUS:%{http_code}\n"
+
+                        echo "\n=== Self-healing service raw response (healing_response.json) ==="
+                        if [ -s healing_response.json ]; then
+                            # Try to pretty-print JSON if jq is available, else cat
+                            if command -v jq > /dev/null 2>&1; then
+                                jq '.' healing_response.json || cat healing_response.json
+                            else
+                                cat healing_response.json
+                            fi
+                        else
+                            echo "Self-healing service returned empty response or failed to write healing_response.json"
+                        fi
+                    else
+                        echo "No TestNG/Surefire XML report found under integration-test/target/surefire-reports/*.xml"
+                        echo "Skipping self-healing service call. If you want automated analysis, ensure integration tests produce Surefire/TestNG XML reports and the self-healing service is running at http://localhost:8085"
+                    fi
                 """
-            }
-        }
-        cleanup {
-            cleanWs()
-        }
-    }
+             }
+         }
+         cleanup {
+             cleanWs()
+         }
+     }
 }
 
