@@ -7,13 +7,10 @@ pipeline {
         COMPOSE_PROJECT_NAME = 'dissertation'
         DOCKER_COMPOSE_FILE = 'docker-compose.yml'
         MAVEN_IMAGE = 'maven:3.9-eclipse-temurin-17'
-        // Hostname/IP used to contact the self-healing service from the Jenkins agent
-        // Set to 'host.docker.internal' if the agent is inside a container and services are published on the host.
         SELF_HEALING_HOST = 'localhost'
-        // Default will be set by detection stage, fallback to docker compose (v2)
         DOCKER_COMPOSE_CMD = 'docker compose'
     }
-    
+
     stages {
         stage('Checkout All Repositories') {
             parallel {
@@ -70,136 +67,114 @@ pipeline {
         stage('Setup Docker Compose') {
             steps {
                 script {
-                    // Verify docker-compose.yml exists (it should be at root from CI/CD repo checkout)
                     sh '''
                         echo "=== Verifying workspace structure ==="
                         pwd
                         echo ""
                         echo "=== Checking for docker-compose.yml ==="
                         if [ -f "docker-compose.yml" ]; then
-                            echo "✓ docker-compose.yml found in workspace root"
+                            echo "docker-compose.yml found in workspace root"
                             ls -lh docker-compose.yml
                         elif [ -f "jenkins/docker-compose.yml" ]; then
-                            echo "✓ docker-compose.yml found in jenkins directory, copying to root"
+                            echo "docker-compose.yml found in jenkins directory, copying to root"
                             cp jenkins/docker-compose.yml docker-compose.yml
                         else
-                            echo "✗ docker-compose.yml not found"
+                            echo "docker-compose.yml not found"
                             echo "Available files:"
                             ls -la | head -20
                         fi
                     '''
-                    
-                    // Verify file exists and is accessible
+
                     if (fileExists('docker-compose.yml')) {
-                        echo '✓ docker-compose.yml is available in workspace root'
+                        echo 'docker-compose.yml is available in workspace root'
                     } else if (fileExists('jenkins/docker-compose.yml')) {
                         sh 'cp jenkins/docker-compose.yml docker-compose.yml'
-                        echo '✓ Copied docker-compose.yml from jenkins directory to workspace root'
+                        echo 'Copied docker-compose.yml from jenkins directory to workspace root'
                     } else {
-                        error("""
-                            docker-compose.yml not found!
-                            
-                            Expected locations:
-                            - docker-compose.yml (workspace root)
-                            - jenkins/docker-compose.yml
-                            
-                            Please ensure docker-compose.yml is committed to the dissertation-cicd repository.
-                            Current workspace contents:
-                        """)
-                        sh 'ls -la'
+                        error('docker-compose.yml not found! Please ensure it is committed to the dissertation-cicd repository.')
                     }
                 }
             }
         }
-        
+
         stage('Start Docker Desktop') {
             steps {
                 script {
                     sh '''
                         echo "=== Checking Docker Desktop Status ==="
-                        
-                        # Check if Docker daemon is already running
+
                         if docker info > /dev/null 2>&1; then
-                            echo "✓ Docker daemon is already running"
+                            echo "Docker daemon is already running"
                             docker info | head -5
                             exit 0
                         fi
-                        
+
                         echo "Docker daemon is not running. Attempting to start Docker Desktop..."
-                        
-                        # Check if Docker Desktop application exists (macOS)
+
                         if [ -d "/Applications/Docker.app" ]; then
                             echo "Found Docker Desktop at /Applications/Docker.app"
-                            echo "Starting Docker Desktop..."
-                            
-                            # Start Docker Desktop
-                            open -a Docker || echo "Failed to start Docker Desktop with 'open -a Docker'"
-                            
-                            # Wait for Docker daemon to become available
+                            open -a Docker || echo "Failed to start Docker Desktop with open -a Docker"
+
                             echo "Waiting for Docker daemon to start..."
                             max_attempts=60
                             attempt=0
-                            
+
                             while [ $attempt -lt $max_attempts ]; do
                                 attempt=$((attempt + 1))
-                                
+
                                 if docker info > /dev/null 2>&1; then
-                                    echo "✓ Docker daemon is now running! (took ${attempt} seconds)"
+                                    echo "Docker daemon is now running! (took ${attempt} seconds)"
                                     docker info | head -5
                                     break
                                 fi
-                                
+
                                 if [ $attempt -lt $max_attempts ]; then
                                     echo "Waiting for Docker daemon... (attempt ${attempt}/${max_attempts})"
                                     sleep 2
                                 fi
                             done
-                            
-                            # Final check
+
                             if ! docker info > /dev/null 2>&1; then
-                                echo "✗ ERROR: Docker daemon failed to start after ${max_attempts} attempts"
-                                echo "Please ensure Docker Desktop is installed and can be started manually"
+                                echo "ERROR: Docker daemon failed to start after ${max_attempts} attempts"
                                 exit 1
                             fi
                         else
-                            echo "✗ ERROR: Docker Desktop not found at /Applications/Docker.app"
-                            echo "Please install Docker Desktop from https://www.docker.com/products/docker-desktop"
+                            echo "ERROR: Docker Desktop not found at /Applications/Docker.app"
                             exit 1
                         fi
                     '''
                 }
             }
         }
-        
+
         stage('Verify Docker Connection') {
             steps {
                 sh '''
                     echo "=== Docker Environment ==="
                     echo "PATH: $PATH"
                     echo "DOCKER_HOST: $DOCKER_HOST"
-                    
+
                     echo "=== Docker Socket ==="
                     ls -la /var/run/docker.sock || echo "Socket not found at /var/run/docker.sock"
-                    
+
                     echo "=== Docker Version ==="
                     docker --version
-                    
+
                     echo "=== Docker Info ==="
                     docker info || {
                         echo "ERROR: Cannot connect to Docker daemon"
                         exit 1
                     }
-                    
+
                     echo "=== Test Docker Run ==="
                     docker ps
                 '''
             }
         }
-        
+
         stage('Detect Docker Compose Command') {
             steps {
                 script {
-                    // Try docker compose (v2) first, fall back to docker-compose (v1)
                     try {
                         sh 'docker compose version > /dev/null 2>&1'
                         env.DOCKER_COMPOSE_CMD = 'docker compose'
@@ -216,7 +191,7 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Build All Services') {
             parallel {
                 stage('Build API Gateway') {
@@ -296,20 +271,19 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Stop Existing Containers') {
             steps {
                 script {
                     sh """
                         echo "Stopping any existing containers..."
                         ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} down -v || true
-                        # Wait a moment for cleanup
                         sleep 5
                     """
                 }
             }
         }
-        
+
         stage('Start Infrastructure Services for Tests') {
             steps {
                 script {
@@ -318,22 +292,19 @@ pipeline {
                         ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d redis zookeeper kafka user-db order-db payment-db notification-db
                         echo "Waiting for infrastructure services to be healthy..."
                         sleep 30
-                        
+
                         echo "Verifying database connectivity..."
-                        # Wait for databases to be ready
                         max_attempts=10
                         attempt=0
                         while [ \$attempt -lt \$max_attempts ]; do
                             attempt=\$((attempt + 1))
                             echo "Checking database readiness (attempt \$attempt/\$max_attempts)..."
-                            
-                            # Check each database
-                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5436 -U postgres > /dev/null 2>&1 && echo "✓ user-db ready" || echo "✗ user-db not ready"
-                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5433 -U postgres > /dev/null 2>&1 && echo "✓ order-db ready" || echo "✗ order-db not ready"
-                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5434 -U postgres > /dev/null 2>&1 && echo "✓ payment-db ready" || echo "✗ payment-db not ready"
-                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5435 -U postgres > /dev/null 2>&1 && echo "✓ notification-db ready" || echo "✗ notification-db not ready"
-                            
-                            # Check if all databases are ready
+
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5436 -U postgres > /dev/null 2>&1 && echo "user-db ready" || echo "user-db not ready"
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5433 -U postgres > /dev/null 2>&1 && echo "order-db ready" || echo "order-db not ready"
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5434 -U postgres > /dev/null 2>&1 && echo "payment-db ready" || echo "payment-db not ready"
+                            docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5435 -U postgres > /dev/null 2>&1 && echo "notification-db ready" || echo "notification-db not ready"
+
                             if docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5436 -U postgres > /dev/null 2>&1 && \
                                docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5433 -U postgres > /dev/null 2>&1 && \
                                docker run --rm --network host postgres:16-alpine pg_isready -h localhost -p 5434 -U postgres > /dev/null 2>&1 && \
@@ -341,7 +312,7 @@ pipeline {
                                 echo "All databases are ready!"
                                 break
                             fi
-                            
+
                             if [ \$attempt -lt \$max_attempts ]; then
                                 echo "Waiting 5 seconds before next attempt..."
                                 sleep 5
@@ -351,7 +322,7 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Run Unit Tests') {
             parallel {
                 stage('Test API Gateway') {
@@ -378,7 +349,6 @@ pipeline {
                             dir('userservice') {
                                 def workspace = pwd()
                                 def m2Cache = "${env.HOME}/.m2"
-                                // Tests require databases - configure with correct port and use host.docker.internal for macOS
                                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                                     sh """
                                         docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
@@ -403,7 +373,6 @@ pipeline {
                             dir('orderservice') {
                                 def workspace = pwd()
                                 def m2Cache = "${env.HOME}/.m2"
-                                // Tests require databases - configure with correct port
                                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                                     sh """
                                         docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
@@ -428,7 +397,6 @@ pipeline {
                             dir('paymentservice') {
                                 def workspace = pwd()
                                 def m2Cache = "${env.HOME}/.m2"
-                                // Tests require databases - configure with correct port
                                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                                     sh """
                                         docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
@@ -453,7 +421,6 @@ pipeline {
                             dir('notificationservice') {
                                 def workspace = pwd()
                                 def m2Cache = "${env.HOME}/.m2"
-                                // Tests require databases - configure with correct port
                                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
                                     sh """
                                         docker run --rm --add-host=host.docker.internal:host-gateway -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace \
@@ -474,7 +441,7 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Build Docker Images') {
             steps {
                 script {
@@ -485,7 +452,7 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Start Infrastructure Services') {
             steps {
                 script {
@@ -498,38 +465,36 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Start Microservices') {
             steps {
                 script {
-                    sh '''
+                    sh """
                         echo "Starting all microservices..."
-                        $DOCKER_COMPOSE_CMD -f $DOCKER_COMPOSE_FILE up -d
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d
                         echo "Waiting for services to start..."
                         sleep 60
 
                         echo "Ensuring self-healing service is started and healthy..."
-                        # Explicitly bring up self-healing-service in case it was skipped due to depends_on conditions
-                        $DOCKER_COMPOSE_CMD -f $DOCKER_COMPOSE_FILE up -d self-healing-service || true
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d self-healing-service || true
 
-                        # Wait up to 30s for self-healing health endpoint
                         waited=0
                         max_wait=30
-                        while [ $waited -lt $max_wait ]; do
-                            status=$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
-                            if [ "$status" = "200" ]; then
+                        while [ \$waited -lt \$max_wait ]; do
+                            status=\$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            if [ "\$status" = "200" ]; then
                                 echo "Self-healing service is healthy"
                                 break
                             fi
-                            echo "Self-healing not yet healthy (HTTP $status). Waiting..."
+                            echo "Self-healing not yet healthy (HTTP \$status). Waiting..."
                             sleep 2
-                            waited=$((waited+2))
+                            waited=\$((waited+2))
                         done
-                    '''
+                    """
                 }
             }
         }
-        
+
         stage('Wait for Services to be Healthy') {
             steps {
                 script {
@@ -537,44 +502,45 @@ pipeline {
                         echo "Checking service health endpoints..."
                         max_attempts=30
                         attempt=0
-                        
+                        all_healthy=false
+
                         check_health() {
                             local url=\$1
                             local service=\$2
                             local status_code=\$(curl -s -o /dev/null -w "%{http_code}" \${url} || echo "000")
                             if [ "\${status_code}" = "200" ] || [ "\${status_code}" = "404" ]; then
-                                echo "✓ \${service} is responding (status: \${status_code})"
+                                echo "\${service} is responding (status: \${status_code})"
                                 return 0
                             else
-                                echo "✗ \${service} not ready yet (status: \${status_code})"
+                                echo "\${service} not ready yet (status: \${status_code})"
                                 return 1
                             fi
                         }
-                        
+
                         while [ \${attempt} -lt \${max_attempts} ]; do
                             attempt=\$((attempt + 1))
                             echo "Health check attempt \${attempt}/\${max_attempts}"
-                            
+
                             all_healthy=true
-                            
+
                             check_health "http://localhost:8081/api/auth/health" "User Service" || all_healthy=false
                             check_health "http://localhost:8083/api/payments/health" "Payment Service" || all_healthy=false
                             check_health "http://localhost:8084/api/notifications/health" "Notification Service" || all_healthy=false
                             check_health "http://localhost:8082/api/orders/health" "Order Service" || all_healthy=false
-                            check_health "http://\${SELF_HEALING_HOST}:8085/api/selfhealing/health" "Self-Healing Service" || all_healthy=false
+                            check_health "http://${SELF_HEALING_HOST}:8085/api/selfhealing/health" "Self-Healing Service" || all_healthy=false
                             check_health "http://localhost:8080/actuator/health" "API Gateway" || all_healthy=false
-                            
+
                             if [ "\${all_healthy}" = "true" ]; then
                                 echo "All services are healthy!"
                                 break
                             fi
-                            
+
                             if [ \${attempt} -lt \${max_attempts} ]; then
                                 echo "Waiting 10 seconds before next attempt..."
                                 sleep 10
                             fi
                         done
-                        
+
                         if [ "\${all_healthy}" != "true" ]; then
                             echo "ERROR: Not all services are healthy after \${max_attempts} attempts"
                             ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} ps
@@ -585,51 +551,49 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Health Check') {
             steps {
                 script {
-                    sh '''
+                    sh """
                         echo "Performing final health checks..."
-                        
-                        services=(
-                            "http://localhost:8080/actuator/health:API Gateway"
-                            "http://localhost:8081/api/auth/health:User Service"
-                            "http://localhost:8082/api/orders/health:Order Service"
-                            "http://localhost:8083/api/payments/health:Payment Service"
-                            "http://localhost:8084/api/notifications/health:Notification Service"
-                            "http://${SELF_HEALING_HOST}:8085/api/selfhealing/health:Self-Healing Service"
-                        )
-                        
+
                         failed=false
-                        for service_info in "${services[@]}"; do
-                            url=$(echo $service_info | cut -d: -f1-3)
-                            name=$(echo $service_info | cut -d: -f4)
-                            echo "Checking ${name} at ${url}..."
-                            
-                            response=$(curl -s -w "\\n%{http_code}" ${url} || echo -e "\\n000")
-                            http_code=$(echo "$response" | tail -n1)
-                            body=$(echo "$response" | sed '$d')
-                            
-                            if [ "$http_code" = "200" ]; then
-                                echo "✓ ${name} is healthy (HTTP ${http_code})"
-                                echo "Response: ${body}"
+
+                        check_service() {
+                            local url=\$1
+                            local name=\$2
+                            echo "Checking \${name} at \${url}..."
+                            response=\$(curl -s -w "\\n%{http_code}" \${url} || echo -e "\\n000")
+                            http_code=\$(echo "\$response" | tail -n1)
+                            body=\$(echo "\$response" | sed '\$d')
+
+                            if [ "\$http_code" = "200" ]; then
+                                echo "\${name} is healthy (HTTP \${http_code})"
+                                echo "Response: \${body}"
                             else
-                                echo "✗ ${name} health check failed (HTTP ${http_code})"
-                                echo "Response: ${body}"
+                                echo "\${name} health check failed (HTTP \${http_code})"
+                                echo "Response: \${body}"
                                 failed=true
                             fi
-                        done
-                        
-                        if [ "$failed" = "true" ]; then
+                        }
+
+                        check_service "http://localhost:8080/actuator/health" "API Gateway"
+                        check_service "http://localhost:8081/api/auth/health" "User Service"
+                        check_service "http://localhost:8082/api/orders/health" "Order Service"
+                        check_service "http://localhost:8083/api/payments/health" "Payment Service"
+                        check_service "http://localhost:8084/api/notifications/health" "Notification Service"
+                        check_service "http://${SELF_HEALING_HOST}:8085/api/selfhealing/health" "Self-Healing Service"
+
+                        if [ "\$failed" = "true" ]; then
                             echo "Some services failed health checks"
                             exit 1
                         fi
-                    '''
+                    """
                 }
             }
         }
-        
+
         stage('Run Integration Tests') {
             steps {
                 script {
@@ -638,12 +602,9 @@ pipeline {
                             def workspace = pwd()
                             def m2Cache = "${env.HOME}/.m2"
                             echo "Running TestNG integration tests from ${workspace}..."
-                            echo "Integration tests will access services at http://localhost:8080"
-                            echo "Using TestNG suite: src/test/resources/testng.xml"
                             sh """
                                 docker run --rm --network host -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn clean test -DsuiteXmlFile=src/test/resources/testng.xml
                             """
-                            // Generate TestNG HTML reports
                             sh """
                                 docker run --rm --network host -v "${workspace}:/workspace" -v "${m2Cache}:/root/.m2" -w /workspace ${MAVEN_IMAGE} mvn surefire-report:report-only || true
                             """
@@ -660,38 +621,18 @@ pipeline {
                         def surefireReports = "${reportDir}/surefire-reports"
                         def surefireHtmlReport = "${reportDir}/site/surefire-report.html"
                         def testOutputDir = "${reportDir}/test-output"
-                        
-                        // Publish JUnit XML reports (compatible with TestNG)
+
                         if (fileExists(surefireReports)) {
                             echo "Publishing JUnit XML reports from ${surefireReports}"
                             junit "${surefireReports}/*.xml"
-                            
-                            // Archive surefire reports directory
                             archiveArtifacts artifacts: "${surefireReports}/**/*", allowEmptyArchive: true
-                            
-                            // Archive Surefire HTML report if it exists
-                            // Note: publishHTML requires HTML Publisher plugin to be installed
-                            // For now, we archive the reports instead
+
                             if (fileExists(surefireHtmlReport)) {
-                                echo "Surefire HTML report found at ${surefireHtmlReport}"
-                                echo "Note: HTML Publisher plugin not installed. Reports are archived as artifacts."
-                                // Archive the HTML report as an artifact
                                 archiveArtifacts artifacts: "${reportDir}/site/**/*.html", allowEmptyArchive: true
                             }
-                            
-                            // Check for TestNG test-output directory (if TestNG generates it)
+
                             if (fileExists(testOutputDir)) {
-                                echo "Found TestNG test-output directory at ${testOutputDir}"
                                 archiveArtifacts artifacts: "${testOutputDir}/**/*", allowEmptyArchive: true
-                                
-                                // Archive TestNG HTML report if index.html exists
-                                // Note: publishHTML requires HTML Publisher plugin to be installed
-                                // For now, we archive the reports instead
-                                if (fileExists("${testOutputDir}/index.html")) {
-                                    echo "TestNG HTML report found at ${testOutputDir}/index.html"
-                                    echo "Note: HTML Publisher plugin not installed. Reports are archived as artifacts."
-                                    // The test-output directory is already archived above, so no additional action needed
-                                }
                             }
                         } else {
                             echo 'No surefire reports found to publish'
@@ -700,14 +641,14 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Display Service Status') {
             steps {
                 script {
                     sh """
                         echo "=== Docker Compose Service Status ==="
                         ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} ps
-                        
+
                         echo ""
                         echo "=== Service Endpoints ==="
                         echo "API Gateway: http://localhost:8080/actuator/health"
@@ -720,11 +661,10 @@ pipeline {
             }
         }
     }
-    
+
     post {
         always {
             script {
-                // Detect Docker Compose command if not already set (fallback for post block)
                 def composeCmd
                 try {
                     composeCmd = env.DOCKER_COMPOSE_CMD
@@ -740,12 +680,7 @@ pipeline {
                         composeCmd = (status == 0) ? 'docker-compose' : 'docker compose'
                     }
                 }
-                
-                // Optionally keep containers running for manual testing
-                // Uncomment the following line if you want to stop containers after pipeline
-                // sh "${composeCmd} -f ${DOCKER_COMPOSE_FILE} down"
-                
-                // Archive logs for debugging
+
                 sh """
                     ${composeCmd} -f ${DOCKER_COMPOSE_FILE} logs > docker-compose-logs.txt 2>&1 || true
                 """
@@ -764,7 +699,6 @@ pipeline {
         failure {
             echo 'Pipeline failed! Check logs for details.'
             script {
-                // Detect Docker Compose command if not already set (fallback for post block)
                 def composeCmd
                 try {
                     composeCmd = env.DOCKER_COMPOSE_CMD
@@ -780,85 +714,54 @@ pipeline {
                         composeCmd = (status == 0) ? 'docker-compose' : 'docker compose'
                     }
                 }
-                
-                sh '''
+
+                sh """
                     echo "=== Container Logs ==="
                     ${composeCmd} -f ${DOCKER_COMPOSE_FILE} logs --tail=100 2>&1 || echo "Could not retrieve logs"
 
                     echo "=== Container Status ==="
                     ${composeCmd} -f ${DOCKER_COMPOSE_FILE} ps -a 2>&1 || echo "Could not retrieve container status"
 
-                    echo "\n=== Attempting to invoke self-healing service for failure analysis ==="
+                    echo "=== Attempting to invoke self-healing service for failure analysis ==="
 
-                    # Locate a TestNG/Surefire XML report produced by integration tests
-                    REPORT_FILE=$(ls -1 integration-test/target/surefire-reports/*.xml 2>/dev/null | head -n1 || true)
+                    REPORT_FILE=\$(ls -1 integration-test/target/surefire-reports/*.xml 2>/dev/null | head -n1 || true)
 
-                    if [ -n "${REPORT_FILE}" ] && [ -f "${REPORT_FILE}" ]; then
-                        echo "Found TestNG/Surefire report: ${REPORT_FILE}"
-                        echo "Posting report to self-healing service at http://localhost:8085/api/selfhealing/test-fixes"
+                    if [ -n "\${REPORT_FILE}" ] && [ -f "\${REPORT_FILE}" ]; then
+                        echo "Found TestNG/Surefire report: \${REPORT_FILE}"
+                        echo "Posting report to self-healing service at http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes"
 
-                        # Wait for self-healing service health endpoint to be ready (30s max)
                         HEALTH_OK=0
                         max_wait=30
                         waited=0
-                        while [ $waited -lt $max_wait ]; do
-                            HC=$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
-                            if [ "${HC}" = "200" ]; then
+                        while [ \$waited -lt \$max_wait ]; do
+                            HC=\$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            if [ "\${HC}" = "200" ]; then
                                 HEALTH_OK=1
                                 break
                             fi
-                            echo "Self-healing service not ready (HTTP ${HC}). Retrying in 2s... (waited=${waited}s)"
+                            echo "Self-healing service not ready (HTTP \${HC}). Retrying in 2s... (waited=\${waited}s)"
                             sleep 2
-                            waited=$((waited + 2))
+                            waited=\$((waited + 2))
                         done
 
-                        if [ $HEALTH_OK -ne 1 ]; then
-                            echo "Self-healing service did not become healthy within ${max_wait}s. Will attempt POST once (curl will report failure if unreachable)."
+                        if [ \$HEALTH_OK -ne 1 ]; then
+                            echo "Self-healing service did not become healthy within \${max_wait}s. Attempting POST anyway."
                         fi
 
-                        # POST the XML report with retries and timeout. Capture both HTTP status and curl exit code.
-                        HTTP_STATUS=$(curl --max-time 30 --retry 2 --retry-delay 3 --show-error -s -o healing_response.json -w "%{http_code}" -X POST \
+                        HTTP_STATUS=\$(curl --max-time 30 --retry 2 --retry-delay 3 --show-error -s -o healing_response.json -w "%{http_code}" -X POST \
                             -H 'Content-Type: application/xml' \
-                            --data-binary @"${REPORT_FILE}" \
+                            --data-binary @"\${REPORT_FILE}" \
                             http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes) || true
-                        CURL_EXIT=$?
-                        echo "CURL_EXIT:${CURL_EXIT} HTTP_STATUS:${HTTP_STATUS}"
+                        CURL_EXIT=\$?
+                        echo "CURL_EXIT:\${CURL_EXIT} HTTP_STATUS:\${HTTP_STATUS}"
 
-                        # If curl failed (non-zero exit) or returned non-2xx, capture verbose debug output
-                        if [ ${CURL_EXIT} -ne 0 ] || [ "${HTTP_STATUS}" = "000" ] || [ "${HTTP_STATUS:0:1}" != "2" ]; then
-                            echo "Curl POST may have failed or returned HTTP ${HTTP_STATUS} (exit ${CURL_EXIT}). Capturing verbose output to healing_response_debug.txt for diagnostics."
-                            curl --max-time 30 -v -X POST -H 'Content-Type: application/xml' --data-binary @"${REPORT_FILE}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes > healing_response_debug.txt 2>&1 || true
-
-                            # Fallback: try posting from inside the self-healing container (use container's network)
-                            echo "Attempting fallback POST from inside the self-healing container..."
-                            if ${composeCmd} >/dev/null 2>&1; then
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} ps | grep -q self-healing-service || echo "self-healing-service not present in compose ps output"
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
-
-                                # Copy the report into container (temporary) and run curl if exec failed above due to missing file
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "cat > /tmp/report.xml" < "${REPORT_FILE}" || true
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
-
-                                # Copy response out of container if it exists
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "if [ -s /tmp/healing_response_container.json ]; then cat /tmp/healing_response_container.json; fi" > healing_response_container.json || true
-                                if [ -s healing_response_container.json ]; then
-                                    echo "--- Container-side healing response (healing_response_container.json) ---"
-                                    if command -v jq > /dev/null 2>&1; then
-                                        jq '.' healing_response_container.json || cat healing_response_container.json
-                                    else
-                                        cat healing_response_container.json
-                                    fi
-                                else
-                                    echo "No container-side healing response produced"
-                                fi
-                            else
-                                echo "docker compose not available on this agent; cannot run container-side fallback"
-                            fi
+                        if [ \${CURL_EXIT} -ne 0 ] || [ "\${HTTP_STATUS}" = "000" ] || [ "\${HTTP_STATUS%\${HTTP_STATUS#?}}" != "2" ]; then
+                            echo "Curl POST may have failed or returned HTTP \${HTTP_STATUS} (exit \${CURL_EXIT}). Capturing verbose output."
+                            curl --max-time 30 -v -X POST -H 'Content-Type: application/xml' --data-binary @"\${REPORT_FILE}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes > healing_response_debug.txt 2>&1 || true
                         fi
 
-                        echo "\n=== Self-healing service raw response (healing_response.json) ==="
+                        echo "=== Self-healing service raw response (healing_response.json) ==="
                         if [ -s healing_response.json ]; then
-                            # Try to pretty-print JSON if jq is available, else cat
                             if command -v jq > /dev/null 2>&1; then
                                 jq '.' healing_response.json || cat healing_response.json
                             else
@@ -867,14 +770,11 @@ pipeline {
                         else
                             echo "Self-healing service returned empty response or healing_response.json missing"
                         fi
-
-                    } else {
-                        echo "No TestNG/Surefire XML report found under integration-test/target/surefire-reports/*.xml"
-                        echo "Skipping self-healing service call. If you want automated analysis, ensure integration tests produce Surefire/TestNG XML reports and the self-healing service is running at http://localhost:8085"
+                    else
+                        echo "No TestNG/Surefire XML report found. Skipping self-healing service call."
                     fi
+                """
 
-                    """
-                // Archive healing_response.json (if produced) for later inspection
                 if (fileExists('healing_response.json')) {
                     echo 'Archiving healing_response.json as a build artifact'
                     archiveArtifacts artifacts: 'healing_response.json', allowEmptyArchive: true
@@ -884,11 +784,10 @@ pipeline {
                 } else {
                     echo 'No healing response files to archive'
                 }
-             }
-         }
-         cleanup {
-             cleanWs()
-         }
-     }
+            }
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
 }
-
