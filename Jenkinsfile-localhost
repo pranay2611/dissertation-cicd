@@ -7,6 +7,9 @@ pipeline {
         COMPOSE_PROJECT_NAME = 'dissertation'
         DOCKER_COMPOSE_FILE = 'docker-compose.yml'
         MAVEN_IMAGE = 'maven:3.9-eclipse-temurin-17'
+        // Hostname/IP used to contact the self-healing service from the Jenkins agent
+        // Set to 'host.docker.internal' if the agent is inside a container and services are published on the host.
+        SELF_HEALING_HOST = 'localhost'
         // Default will be set by detection stage, fallback to docker compose (v2)
         DOCKER_COMPOSE_CMD = 'docker compose'
     }
@@ -504,6 +507,24 @@ pipeline {
                         ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d
                         echo "Waiting for services to start..."
                         sleep 60
+
+                        echo "Ensuring self-healing service is started and healthy..."
+                        # Explicitly bring up self-healing-service in case it was skipped due to depends_on conditions
+                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d self-healing-service || true
+
+                        # Wait up to 30s for self-healing health endpoint
+                        waited=0
+                        max_wait=30
+                        while [ $waited -lt $max_wait ]; do
+                            status=$(curl -s -o /dev/null -w "%{http_code}" http://\${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            if [ "$status" = "200" ]; then
+                                echo "Self-healing service is healthy"
+                                break
+                            fi
+                            echo "Self-healing not yet healthy (HTTP $status). Waiting..."
+                            sleep 2
+                            waited=$((waited+2))
+                        done
                     """
                 }
             }
@@ -540,6 +561,7 @@ pipeline {
                             check_health "http://localhost:8083/api/payments/health" "Payment Service" || all_healthy=false
                             check_health "http://localhost:8084/api/notifications/health" "Notification Service" || all_healthy=false
                             check_health "http://localhost:8082/api/orders/health" "Order Service" || all_healthy=false
+                            check_health "http://\${SELF_HEALING_HOST}:8085/api/selfhealing/health" "Self-Healing Service" || all_healthy=false
                             check_health "http://localhost:8080/actuator/health" "API Gateway" || all_healthy=false
                             
                             if [ "\${all_healthy}" = "true" ]; then
@@ -576,6 +598,7 @@ pipeline {
                             "http://localhost:8082/api/orders/health:Order Service"
                             "http://localhost:8083/api/payments/health:Payment Service"
                             "http://localhost:8084/api/notifications/health:Notification Service"
+                            "http://${SELF_HEALING_HOST}:8085/api/selfhealing/health:Self-Healing Service"
                         )
                         
                         failed=false
@@ -774,12 +797,64 @@ pipeline {
                         echo "Found TestNG/Surefire report: \${REPORT_FILE}"
                         echo "Posting report to self-healing service at http://localhost:8085/api/selfhealing/test-fixes"
 
-                        # POST the XML report and capture response (pretty-print raw JSON)
-                        curl -s -X POST \
+                        # Wait for self-healing service health endpoint to be ready (30s max)
+                        HEALTH_OK=0
+                        max_wait=30
+                        waited=0
+                        while [ $waited -lt $max_wait ]; do
+                            HC=\$(curl -s -o /dev/null -w "%{http_code}" http://\${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            if [ "\${HC}" = "200" ]; then
+                                HEALTH_OK=1
+                                break
+                            fi
+                            echo "Self-healing service not ready (HTTP \${HC}). Retrying in 2s... (waited=\${waited}s)"
+                            sleep 2
+                            waited=$((waited + 2))
+                        done
+
+                        if [ $HEALTH_OK -ne 1 ]; then
+                            echo "Self-healing service did not become healthy within ${max_wait}s. Will attempt POST once (curl will report failure if unreachable)."
+                        fi
+
+                        # POST the XML report with retries and timeout. Capture both HTTP status and curl exit code.
+                        HTTP_STATUS=$(curl --max-time 30 --retry 2 --retry-delay 3 --show-error -s -o healing_response.json -w "%{http_code}" -X POST \
                             -H 'Content-Type: application/xml' \
                             --data-binary @"\${REPORT_FILE}" \
-                            http://localhost:8085/api/selfhealing/test-fixes \
-                            -o healing_response.json -w "\nHTTP_STATUS:%{http_code}\n"
+                            http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes) || true
+                        CURL_EXIT=$?
+                        echo "CURL_EXIT:${CURL_EXIT} HTTP_STATUS:${HTTP_STATUS}"
+
+                        # If curl failed (non-zero exit) or returned non-2xx, capture verbose debug output
+                        if [ ${CURL_EXIT} -ne 0 ] || [ "${HTTP_STATUS}" = "000" ] || [ "${HTTP_STATUS:0:1}" != "2" ]; then
+                            echo "Curl POST may have failed or returned HTTP ${HTTP_STATUS} (exit ${CURL_EXIT}). Capturing verbose output to healing_response_debug.txt for diagnostics."
+                            curl --max-time 30 -v -X POST -H 'Content-Type: application/xml' --data-binary @"\${REPORT_FILE}" http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes > healing_response_debug.txt 2>&1 || true
+
+                            # Fallback: try posting from inside the self-healing container (use container's network)
+                            echo "Attempting fallback POST from inside the self-healing container..."
+                            if ${composeCmd} >/dev/null 2>&1; then
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} ps | grep -q self-healing-service || echo "self-healing-service not present in compose ps output"
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
+
+                                # Copy the report into container (temporary) and run curl if exec failed above due to missing file
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "cat > /tmp/report.xml" < "\${REPORT_FILE}" || true
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
+
+                                # Copy response out of container if it exists
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "if [ -s /tmp/healing_response_container.json ]; then cat /tmp/healing_response_container.json; fi" > healing_response_container.json || true
+                                if [ -s healing_response_container.json ]; then
+                                    echo "--- Container-side healing response (healing_response_container.json) ---"
+                                    if command -v jq > /dev/null 2>&1; then
+                                        jq '.' healing_response_container.json || cat healing_response_container.json
+                                    else
+                                        cat healing_response_container.json
+                                    fi
+                                else
+                                    echo "No container-side healing response produced"
+                                fi
+                            else
+                                echo "docker compose not available on this agent; cannot run container-side fallback"
+                            fi
+                        fi
 
                         echo "\n=== Self-healing service raw response (healing_response.json) ==="
                         if [ -s healing_response.json ]; then
@@ -790,13 +865,25 @@ pipeline {
                                 cat healing_response.json
                             fi
                         else
-                            echo "Self-healing service returned empty response or failed to write healing_response.json"
+                            echo "Self-healing service returned empty response or healing_response.json missing"
                         fi
-                    else
+
+                    } else {
                         echo "No TestNG/Surefire XML report found under integration-test/target/surefire-reports/*.xml"
                         echo "Skipping self-healing service call. If you want automated analysis, ensure integration tests produce Surefire/TestNG XML reports and the self-healing service is running at http://localhost:8085"
                     fi
-                """
+
+                    """
+                // Archive healing_response.json (if produced) for later inspection
+                if (fileExists('healing_response.json')) {
+                    echo 'Archiving healing_response.json as a build artifact'
+                    archiveArtifacts artifacts: 'healing_response.json', allowEmptyArchive: true
+                } else if (fileExists('healing_response_debug.txt')) {
+                    echo 'Archiving healing_response_debug.txt (debug output)'
+                    archiveArtifacts artifacts: 'healing_response_debug.txt', allowEmptyArchive: true
+                } else {
+                    echo 'No healing response files to archive'
+                }
              }
          }
          cleanup {
