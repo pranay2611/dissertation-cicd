@@ -781,7 +781,7 @@ pipeline {
                     }
                 }
                 
-                sh """
+                sh '''
                     echo "=== Container Logs ==="
                     ${composeCmd} -f ${DOCKER_COMPOSE_FILE} logs --tail=100 2>&1 || echo "Could not retrieve logs"
 
@@ -791,10 +791,10 @@ pipeline {
                     echo "\n=== Attempting to invoke self-healing service for failure analysis ==="
 
                     # Locate a TestNG/Surefire XML report produced by integration tests
-                    REPORT_FILE=\$(ls -1 integration-test/target/surefire-reports/*.xml 2>/dev/null | head -n1 || true)
+                    REPORT_FILE=$(ls -1 integration-test/target/surefire-reports/*.xml 2>/dev/null | head -n1 || true)
 
-                    if [ -n "\${REPORT_FILE}" ] && [ -f "\${REPORT_FILE}" ]; then
-                        echo "Found TestNG/Surefire report: \${REPORT_FILE}"
+                    if [ -n "${REPORT_FILE}" ] && [ -f "${REPORT_FILE}" ]; then
+                        echo "Found TestNG/Surefire report: ${REPORT_FILE}"
                         echo "Posting report to self-healing service at http://localhost:8085/api/selfhealing/test-fixes"
 
                         # Wait for self-healing service health endpoint to be ready (30s max)
@@ -802,12 +802,12 @@ pipeline {
                         max_wait=30
                         waited=0
                         while [ $waited -lt $max_wait ]; do
-                            HC=\$(curl -s -o /dev/null -w "%{http_code}" http://\${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
-                            if [ "\${HC}" = "200" ]; then
+                            HC=$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            if [ "${HC}" = "200" ]; then
                                 HEALTH_OK=1
                                 break
                             fi
-                            echo "Self-healing service not ready (HTTP \${HC}). Retrying in 2s... (waited=\${waited}s)"
+                            echo "Self-healing service not ready (HTTP ${HC}). Retrying in 2s... (waited=${waited}s)"
                             sleep 2
                             waited=$((waited + 2))
                         done
@@ -819,25 +819,25 @@ pipeline {
                         # POST the XML report with retries and timeout. Capture both HTTP status and curl exit code.
                         HTTP_STATUS=$(curl --max-time 30 --retry 2 --retry-delay 3 --show-error -s -o healing_response.json -w "%{http_code}" -X POST \
                             -H 'Content-Type: application/xml' \
-                            --data-binary @"\${REPORT_FILE}" \
-                            http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes) || true
+                            --data-binary @"${REPORT_FILE}" \
+                            http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes) || true
                         CURL_EXIT=$?
                         echo "CURL_EXIT:${CURL_EXIT} HTTP_STATUS:${HTTP_STATUS}"
 
                         # If curl failed (non-zero exit) or returned non-2xx, capture verbose debug output
                         if [ ${CURL_EXIT} -ne 0 ] || [ "${HTTP_STATUS}" = "000" ] || [ "${HTTP_STATUS:0:1}" != "2" ]; then
                             echo "Curl POST may have failed or returned HTTP ${HTTP_STATUS} (exit ${CURL_EXIT}). Capturing verbose output to healing_response_debug.txt for diagnostics."
-                            curl --max-time 30 -v -X POST -H 'Content-Type: application/xml' --data-binary @"\${REPORT_FILE}" http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes > healing_response_debug.txt 2>&1 || true
+                            curl --max-time 30 -v -X POST -H 'Content-Type: application/xml' --data-binary @"${REPORT_FILE}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes > healing_response_debug.txt 2>&1 || true
 
                             # Fallback: try posting from inside the self-healing container (use container's network)
                             echo "Attempting fallback POST from inside the self-healing container..."
                             if ${composeCmd} >/dev/null 2>&1; then
                                 ${composeCmd} -f ${DOCKER_COMPOSE_FILE} ps | grep -q self-healing-service || echo "self-healing-service not present in compose ps output"
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
 
                                 # Copy the report into container (temporary) and run curl if exec failed above due to missing file
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "cat > /tmp/report.xml" < "\${REPORT_FILE}" || true
-                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://\${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "cat > /tmp/report.xml" < "${REPORT_FILE}" || true
+                                ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "curl -s -X POST -H 'Content-Type: application/xml' --data-binary @/tmp/report.xml http://${SELF_HEALING_HOST}:8085/api/selfhealing/test-fixes -o /tmp/healing_response_container.json -w '\nHTTP_STATUS_CONTAINER:%{http_code}\n'" || true
 
                                 # Copy response out of container if it exists
                                 ${composeCmd} -f ${DOCKER_COMPOSE_FILE} exec -T self-healing-service sh -c "if [ -s /tmp/healing_response_container.json ]; then cat /tmp/healing_response_container.json; fi" > healing_response_container.json || true
