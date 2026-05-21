@@ -502,21 +502,21 @@ pipeline {
         stage('Start Microservices') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "Starting all microservices..."
-                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d
+                        $DOCKER_COMPOSE_CMD -f $DOCKER_COMPOSE_FILE up -d
                         echo "Waiting for services to start..."
                         sleep 60
 
                         echo "Ensuring self-healing service is started and healthy..."
                         # Explicitly bring up self-healing-service in case it was skipped due to depends_on conditions
-                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d self-healing-service || true
+                        $DOCKER_COMPOSE_CMD -f $DOCKER_COMPOSE_FILE up -d self-healing-service || true
 
                         # Wait up to 30s for self-healing health endpoint
                         waited=0
                         max_wait=30
                         while [ $waited -lt $max_wait ]; do
-                            status=$(curl -s -o /dev/null -w "%{http_code}" http://\${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            status=$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
                             if [ "$status" = "200" ]; then
                                 echo "Self-healing service is healthy"
                                 break
@@ -525,7 +525,7 @@ pipeline {
                             sleep 2
                             waited=$((waited+2))
                         done
-                    """
+                    '''
                 }
             }
         }
