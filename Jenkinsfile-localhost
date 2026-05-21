@@ -61,6 +61,14 @@ pipeline {
                         }
                     }
                 }
+                stage('Checkout Self-Healing Service') {
+                    steps {
+                        dir('self-healing-service') {
+                            // Clone the self-healing service so the pipeline can start it directly
+                            git branch: 'main', url: 'https://github.com/pranay2611/dissertation-healing-service.git'
+                        }
+                    }
+                }
             }
         }
 
@@ -469,28 +477,45 @@ pipeline {
         stage('Start Microservices') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "Starting all microservices..."
-                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d
+                        $DOCKER_COMPOSE_CMD -f $DOCKER_COMPOSE_FILE up -d || true
                         echo "Waiting for services to start..."
-                        sleep 60
+                        sleep 10
 
-                        echo "Ensuring self-healing service is started and healthy..."
-                        ${DOCKER_COMPOSE_CMD} -f ${DOCKER_COMPOSE_FILE} up -d self-healing-service || true
+                        echo "Attempting to start the self-healing service from checked-out repo if present..."
+                        if [ -d "self-healing-service" ]; then
+                            echo "Found self-healing-service directory"
+                            if [ -f "self-healing-service/run.sh" ]; then
+                                echo "Running self-healing-service/run.sh"
+                                chmod +x self-healing-service/run.sh || true
+                                (cd self-healing-service && nohup ./run.sh > ../self-healing-service.log 2>&1 &) || true
+                            elif [ -f "self-healing-service/Dockerfile" ]; then
+                                echo "Building Docker image for self-healing-service"
+                                docker build -t self-healing-service ./self-healing-service || true
+                                docker rm -f self-healing-service 2>/dev/null || true
+                                docker run -d --name self-healing-service -p 8085:8085 self-healing-service || true
+                            else
+                                echo "No run.sh or Dockerfile found in self-healing-service; skipping automatic start"
+                            fi
+                        else
+                            echo "self-healing-service repository not checked out; ensure checkout stage includes it"
+                        fi
 
+                        echo "Waiting for self-healing service to become healthy..."
                         waited=0
-                        max_wait=30
-                        while [ \$waited -lt \$max_wait ]; do
-                            status=\$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
-                            if [ "\$status" = "200" ]; then
+                        max_wait=60
+                        while [ $waited -lt $max_wait ]; do
+                            status=$(curl -s -o /dev/null -w "%{http_code}" http://${SELF_HEALING_HOST}:8085/api/selfhealing/health || echo "000")
+                            if [ "$status" = "200" ]; then
                                 echo "Self-healing service is healthy"
                                 break
                             fi
-                            echo "Self-healing not yet healthy (HTTP \$status). Waiting..."
+                            echo "Self-healing not yet healthy (HTTP $status). Waiting..."
                             sleep 2
-                            waited=\$((waited+2))
+                            waited=$((waited+2))
                         done
-                    """
+                    '''
                 }
             }
         }
